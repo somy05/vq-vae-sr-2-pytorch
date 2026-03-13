@@ -6,10 +6,11 @@ import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader
 
-from torchvision import datasets, transforms, utils
+from torchvision import utils
 
 from tqdm import tqdm
 
+from dataset import GameIRSuperResolutionDataset
 from vqvae import VQVAE
 from scheduler import CycleScheduler
 import distributed as dist
@@ -27,7 +28,7 @@ def train(epoch, loader, model, optimizer, scheduler, device):
     mse_sum = 0
     mse_n = 0
 
-    for i, (img, label) in enumerate(loader):
+    for i, (_, img) in enumerate(loader):
         model.zero_grad()
 
         img = img.to(device)
@@ -75,27 +76,24 @@ def train(epoch, loader, model, optimizer, scheduler, device):
                     f"sample/{str(epoch + 1).zfill(5)}_{str(i).zfill(5)}.png",
                     nrow=sample_size,
                     normalize=True,
-                    range=(-1, 1),
+                    value_range=(-1, 1),
                 )
 
                 model.train()
 
 
 def main(args):
-    device = "cuda"
+    device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
 
     args.distributed = dist.get_world_size() > 1
 
-    transform = transforms.Compose(
-        [
-            transforms.Resize(args.size),
-            transforms.CenterCrop(args.size),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
-        ]
+    dataset = GameIRSuperResolutionDataset(
+        lr_dir=args.lr_path,
+        hr_dir=args.hr_path,
+        hr_patch_size=args.size,
+        scale=2,
+        augment=True,
     )
-
-    dataset = datasets.ImageFolder(args.path, transform=transform)
     sampler = dist.data_sampler(dataset, shuffle=True, distributed=args.distributed)
     loader = DataLoader(
         dataset, batch_size=128 // args.n_gpu, sampler=sampler, num_workers=2
@@ -143,7 +141,8 @@ if __name__ == "__main__":
     parser.add_argument("--epoch", type=int, default=560)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--sched", type=str)
-    parser.add_argument("path", type=str)
+    parser.add_argument("--lr_path", type=str, required=True)
+    parser.add_argument("--hr_path", type=str, required=True)
 
     args = parser.parse_args()
 

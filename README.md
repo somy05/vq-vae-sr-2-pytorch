@@ -25,13 +25,15 @@ Currently supports 256px (top/bottom hierarchical prior)
 
 If you use FFHQ, I highly recommends to preprocess images. (resize and convert to jpeg)
 
-2. Extract codes for stage 2 training
+2. Stage 2 (PixelSNAIL) directly from GameIR LR/HR patches
 
-> python extract_code.py --ckpt checkpoint/[VQ-VAE CHECKPOINT] --name [LMDB NAME] [DATASET PATH]
+Top prior (optionally conditioned on LR top code):
 
-3. Stage 2 (PixelSNAIL)
+> python train_pixelsnail.py --hier top --use_lr_condition --vqvae_ckpt checkpoint/[VQ-VAE CHECKPOINT] --lr_path [GAMEIR_LR_PATH] --hr_path [GAMEIR_HR_PATH]
 
-> python train_pixelsnail.py [LMDB NAME]
+Bottom prior:
+
+> python train_pixelsnail.py --hier bottom --vqvae_ckpt checkpoint/[VQ-VAE CHECKPOINT] --lr_path [GAMEIR_LR_PATH] --hr_path [GAMEIR_HR_PATH]
 
 Maybe it is better to use larger PixelSNAIL model. Currently model size is reduced due to GPU constraints.
 

@@ -1,51 +1,76 @@
 import os
-import pickle
-from collections import namedtuple
+import random
 
-import torch
+import torchvision.transforms.functional as TF
+from PIL import Image
 from torch.utils.data import Dataset
-from torchvision import datasets
-import lmdb
 
 
-CodeRow = namedtuple('CodeRow', ['top', 'bottom', 'filename'])
-
-
-class ImageFileDataset(datasets.ImageFolder):
-    def __getitem__(self, index):
-        sample, target = super().__getitem__(index)
-        path, _ = self.samples[index]
-        dirs, filename = os.path.split(path)
-        _, class_name = os.path.split(dirs)
-        filename = os.path.join(class_name, filename)
-
-        return sample, target, filename
-
-
-class LMDBDataset(Dataset):
-    def __init__(self, path):
-        self.env = lmdb.open(
-            path,
-            max_readers=32,
-            readonly=True,
-            lock=False,
-            readahead=False,
-            meminit=False,
+class GameIRSuperResolutionDataset(Dataset):
+    def __init__(
+        self,
+        lr_dir,
+        hr_dir,
+        hr_patch_size=256,
+        scale=2,
+        augment=True,
+        return_name=False,
+        patch_per_image=1,
+    ):
+        self.lr_dir = lr_dir
+        self.hr_dir = hr_dir
+        self.hr_patch_size = hr_patch_size
+        self.lr_patch_size = hr_patch_size // scale
+        self.scale = scale
+        self.augment = augment
+        self.return_name = return_name
+        self.patch_per_image = patch_per_image
+        self.image_names = sorted(
+            f
+            for f in os.listdir(hr_dir)
+            if os.path.isfile(os.path.join(hr_dir, f))
+            and os.path.isfile(os.path.join(lr_dir, f))
         )
 
-        if not self.env:
-            raise IOError('Cannot open lmdb dataset', path)
-
-        with self.env.begin(write=False) as txn:
-            self.length = int(txn.get('length'.encode('utf-8')).decode('utf-8'))
-
     def __len__(self):
-        return self.length
+        return len(self.image_names) * self.patch_per_image
 
     def __getitem__(self, index):
-        with self.env.begin(write=False) as txn:
-            key = str(index).encode('utf-8')
+        image_index = index % len(self.image_names)
+        img_name = self.image_names[image_index]
+        lr_image = Image.open(os.path.join(self.lr_dir, img_name)).convert('RGB')
+        hr_image = Image.open(os.path.join(self.hr_dir, img_name)).convert('RGB')
 
-            row = pickle.loads(txn.get(key))
+        hr_w, hr_h = hr_image.size
+        if hr_h < self.hr_patch_size or hr_w < self.hr_patch_size:
+            raise ValueError(
+                f'Image {img_name} is smaller than requested HR patch size {self.hr_patch_size}'
+            )
 
-        return torch.from_numpy(row.top), torch.from_numpy(row.bottom), row.filename
+        top = random.randint(0, hr_h - self.hr_patch_size)
+        left = random.randint(0, hr_w - self.hr_patch_size)
+
+        hr_patch = TF.crop(hr_image, top, left, self.hr_patch_size, self.hr_patch_size)
+        lr_patch = TF.crop(
+            lr_image,
+            top // self.scale,
+            left // self.scale,
+            self.lr_patch_size,
+            self.lr_patch_size,
+        )
+
+        if self.augment and random.random() > 0.5:
+            hr_patch = TF.hflip(hr_patch)
+            lr_patch = TF.hflip(lr_patch)
+
+        hr_patch = TF.normalize(
+            TF.to_tensor(hr_patch), [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]
+        )
+        lr_patch = TF.normalize(
+            TF.to_tensor(lr_patch), [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]
+        )
+
+        if self.return_name:
+            return lr_patch, hr_patch, img_name
+
+        return lr_patch, hr_patch
