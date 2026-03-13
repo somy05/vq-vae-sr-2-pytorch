@@ -1,6 +1,4 @@
 import argparse
-
-import numpy as np
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader
@@ -12,24 +10,37 @@ try:
 except ImportError:
     amp = None
 
-from dataset import LMDBDataset
+from dataset import GameIRSuperResolutionDataset
 from pixelsnail import PixelSNAIL
 from scheduler import CycleScheduler
+from vqvae import VQVAE
 
 
-def train(args, epoch, loader, model, optimizer, scheduler, device):
+def train(args, epoch, loader, model, vqvae, optimizer, scheduler, device):
     loader = tqdm(loader)
 
     criterion = nn.CrossEntropyLoss()
 
-    for i, (top, bottom, label) in enumerate(loader):
+    for i, (lr_img, hr_img) in enumerate(loader):
         model.zero_grad()
 
-        top = top.to(device)
+        lr_img = lr_img.to(device)
+        hr_img = hr_img.to(device)
+
+        with torch.no_grad():
+            _, _, _, top, bottom = vqvae.encode(hr_img)
+            _, _, _, lr_top, _ = vqvae.encode(lr_img)
+
+        top = top.long()
+        bottom = bottom.long()
+        lr_top = lr_top.long()
 
         if args.hier == 'top':
             target = top
-            out, _ = model(top)
+            if args.use_lr_condition:
+                out, _ = model(top, condition=lr_top)
+            else:
+                out, _ = model(top)
 
         elif args.hier == 'bottom':
             bottom = bottom.to(device)
@@ -57,16 +68,6 @@ def train(args, epoch, loader, model, optimizer, scheduler, device):
         )
 
 
-class PixelTransform:
-    def __init__(self):
-        pass
-
-    def __call__(self, input):
-        ar = np.array(input)
-
-        return torch.from_numpy(ar).long()
-
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch', type=int, default=32)
@@ -79,27 +80,47 @@ if __name__ == '__main__':
     parser.add_argument('--n_out_res_block', type=int, default=0)
     parser.add_argument('--n_cond_res_block', type=int, default=3)
     parser.add_argument('--dropout', type=float, default=0.1)
+    parser.add_argument('--size', type=int, default=256)
+    parser.add_argument('--scale', type=int, default=2)
+    parser.add_argument('--use_lr_condition', action='store_true')
     parser.add_argument('--amp', type=str, default='O0')
     parser.add_argument('--sched', type=str)
     parser.add_argument('--ckpt', type=str)
-    parser.add_argument('path', type=str)
+    parser.add_argument('--vqvae_ckpt', type=str, required=True)
+    parser.add_argument('--lr_path', type=str, required=True)
+    parser.add_argument('--hr_path', type=str, required=True)
 
     args = parser.parse_args()
 
     print(args)
 
-    device = 'cuda'
+    device = (
+        'mps'
+        if torch.backends.mps.is_available()
+        else ('cuda' if torch.cuda.is_available() else 'cpu')
+    )
 
-    dataset = LMDBDataset(args.path)
+    dataset = GameIRSuperResolutionDataset(
+        lr_dir=args.lr_path,
+        hr_dir=args.hr_path,
+        hr_patch_size=args.size,
+        scale=args.scale,
+        augment=True,
+        patch_per_image=4
+    )
     loader = DataLoader(
         dataset, batch_size=args.batch, shuffle=True, num_workers=4, drop_last=True
     )
 
+    vqvae = VQVAE()
+    vqvae.load_state_dict(torch.load(args.vqvae_ckpt, map_location=device))
+    vqvae = vqvae.to(device)
+    vqvae.eval()
+
     ckpt = {}
 
     if args.ckpt is not None:
-        ckpt = torch.load(args.ckpt)
-        args = ckpt['args']
+        ckpt = torch.load(args.ckpt, map_location=device)
 
     if args.hier == 'top':
         model = PixelSNAIL(
@@ -111,6 +132,8 @@ if __name__ == '__main__':
             args.n_res_block,
             args.n_res_channel,
             dropout=args.dropout,
+            n_cond_res_block=args.n_cond_res_block if args.use_lr_condition else 0,
+            cond_res_channel=args.n_res_channel if args.use_lr_condition else 0,
             n_out_res_block=args.n_out_res_block,
         )
 
@@ -135,10 +158,14 @@ if __name__ == '__main__':
     model = model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
-    if amp is not None:
+    use_cuda_parallel = device == 'cuda' and torch.cuda.device_count() > 1
+
+    if amp is not None and device == 'cuda':
         model, optimizer = amp.initialize(model, optimizer, opt_level=args.amp)
 
-    model = nn.DataParallel(model)
+    if use_cuda_parallel:
+        model = nn.DataParallel(model)
+
     model = model.to(device)
 
     scheduler = None
@@ -148,8 +175,8 @@ if __name__ == '__main__':
         )
 
     for i in range(args.epoch):
-        train(args, i, loader, model, optimizer, scheduler, device)
+        train(args, i, loader, model, vqvae, optimizer, scheduler, device)
         torch.save(
-            {'model': model.module.state_dict(), 'args': args},
+            {'model': model.module.state_dict() if use_cuda_parallel else model.state_dict(), 'args': vars(args)},
             f'checkpoint/pixelsnail_{args.hier}_{str(i + 1).zfill(3)}.pt',
         )
