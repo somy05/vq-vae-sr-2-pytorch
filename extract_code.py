@@ -37,8 +37,12 @@ if __name__ == '__main__':
     parser.add_argument('--size', type=int, default=256)
     parser.add_argument('--scale', type=int, default=2)
     parser.add_argument('--ckpt', type=str, required=True)
-    parser.add_argument('--lr_path', type=str, required=True)
-    parser.add_argument('--hr_path', type=str, required=True)
+    parser.add_argument('--lr_path', type=str, default=None)
+    parser.add_argument('--hr_path', type=str, default=None)
+    parser.add_argument('--root', type=str, default=None, help='GameIR dataset root (nested mode)')
+    parser.add_argument('--lr_res', type=str, default='720p', help='LR resolution folder name')
+    parser.add_argument('--hr_res', type=str, default='1440p', help='HR resolution folder name')
+    parser.add_argument('--suffix', type=str, default='_rgb.png', help='Image filename suffix filter')
     parser.add_argument('--out', type=str, required=True)
 
     args = parser.parse_args()
@@ -52,6 +56,10 @@ if __name__ == '__main__':
     dataset = GameIRSuperResolutionDataset(
         lr_dir=args.lr_path,
         hr_dir=args.hr_path,
+        root=args.root,
+        lr_res=args.lr_res,
+        hr_res=args.hr_res,
+        suffix=args.suffix,
         hr_patch_size=args.size,
         scale=args.scale,
         augment=False,
@@ -60,7 +68,8 @@ if __name__ == '__main__':
     loader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=4)
 
     model = VQVAE()
-    model.load_state_dict(torch.load(args.ckpt, map_location=device))
+    ckpt = torch.load(args.ckpt, map_location=device)
+    model.load_state_dict(ckpt['model'] if 'model' in ckpt else ckpt)
     model = model.to(device)
     model.eval()
 

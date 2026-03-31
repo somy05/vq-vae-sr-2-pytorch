@@ -83,20 +83,29 @@ def train(epoch, loader, model, optimizer, scheduler, device):
 
 
 def main(args):
-    device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     args.distributed = dist.get_world_size() > 1
 
     dataset = GameIRSuperResolutionDataset(
         lr_dir=args.lr_path,
         hr_dir=args.hr_path,
+        root=args.root,
+        lr_res=args.lr_res,
+        hr_res=args.hr_res,
+        suffix=args.suffix,
         hr_patch_size=args.size,
         scale=2,
         augment=True,
     )
     sampler = dist.data_sampler(dataset, shuffle=True, distributed=args.distributed)
     loader = DataLoader(
-        dataset, batch_size=128 // args.n_gpu, sampler=sampler, num_workers=2
+        dataset,
+        batch_size=args.batch,
+        sampler=sampler,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=True,
     )
 
     model = VQVAE().to(device)
@@ -109,6 +118,21 @@ def main(args):
         )
 
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
+
+    start_epoch = 0
+    if args.ckpt is not None:
+        ckpt = torch.load(args.ckpt, map_location=device)
+        model_state = ckpt['model'] if 'model' in ckpt else ckpt
+        if args.distributed:
+            model.module.load_state_dict(model_state)
+        else:
+            model.load_state_dict(model_state)
+        if 'optimizer' in ckpt:
+            optimizer.load_state_dict(ckpt['optimizer'])
+        if 'epoch' in ckpt:
+            start_epoch = ckpt['epoch']
+        print(f"Resumed from epoch {start_epoch}")
+
     scheduler = None
     if args.sched == "cycle":
         scheduler = CycleScheduler(
@@ -119,11 +143,18 @@ def main(args):
             warmup_proportion=0.05,
         )
 
-    for i in range(args.epoch):
+    for i in range(start_epoch, args.epoch):
+        if args.distributed:
+            sampler.set_epoch(i)
+
         train(i, loader, model, optimizer, scheduler, device)
 
         if dist.is_primary():
-            torch.save(model.state_dict(), f"checkpoint/vqvae_{str(i + 1).zfill(3)}.pt")
+            state_dict = model.module.state_dict() if args.distributed else model.state_dict()
+            torch.save(
+                {'model': state_dict, 'optimizer': optimizer.state_dict(), 'epoch': i + 1},
+                f"checkpoint/vqvae_{str(i + 1).zfill(3)}.pt",
+            )
 
 
 if __name__ == "__main__":
@@ -137,12 +168,19 @@ if __name__ == "__main__":
     )
     parser.add_argument("--dist_url", default=f"tcp://127.0.0.1:{port}")
 
+    parser.add_argument("--batch", type=int, default=24)
     parser.add_argument("--size", type=int, default=256)
     parser.add_argument("--epoch", type=int, default=560)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--sched", type=str)
-    parser.add_argument("--lr_path", type=str, required=True)
-    parser.add_argument("--hr_path", type=str, required=True)
+    parser.add_argument("--ckpt", type=str, default=None)
+    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--lr_path", type=str, default=None)
+    parser.add_argument("--hr_path", type=str, default=None)
+    parser.add_argument("--root", type=str, default=None, help="GameIR dataset root (nested mode)")
+    parser.add_argument("--lr_res", type=str, default="720p", help="LR resolution folder name")
+    parser.add_argument("--hr_res", type=str, default="1440p", help="HR resolution folder name")
+    parser.add_argument("--suffix", type=str, default="_rgb.png", help="Image filename suffix filter")
 
     args = parser.parse_args()
 

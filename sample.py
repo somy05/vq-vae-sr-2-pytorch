@@ -10,6 +10,7 @@ from tqdm import tqdm
 
 from vqvae import VQVAE
 from pixelsnail import PixelSNAIL
+from resnet_prior import ResNetPrior
 
 
 def cfg_get(cfg, key, default=None):
@@ -27,12 +28,22 @@ def sample_model(model, device, batch, size, temperature, condition=None):
     row = torch.zeros(batch, *size, dtype=torch.int64).to(device)
     cache = {}
 
-    for i in tqdm(range(size[0])):
-        for j in range(size[1]):
-            out, cache = model(row[:, : i + 1, :], condition=condition, cache=cache)
-            prob = torch.softmax(out[:, :, i, j] / temperature, 1)
-            sample = torch.multinomial(prob, 1).squeeze(-1)
-            row[:, i, j] = sample
+    is_autoregressive = getattr(model, 'is_autoregressive', True)
+    if is_autoregressive:
+        for i in tqdm(range(size[0])):
+            for j in range(size[1]):
+                out, cache = model(row[:, : i + 1, :], condition=condition, cache=cache)
+                prob = torch.softmax(out[:, :, i, j] / temperature, 1)
+                sample = torch.multinomial(prob, 1).squeeze(-1)
+                row[:, i, j] = sample
+    else:
+        out, _ = model(row, condition=condition, cache=cache)
+        # out is [batch, n_class, height, width]
+        batch_size, n_class, height, width = out.shape
+        out = out.permute(0, 2, 3, 1).reshape(-1, n_class)
+        prob = torch.softmax(out / temperature, 1)
+        sample = torch.multinomial(prob, 1)
+        row = sample.reshape(batch_size, height, width)
 
     return row
 
@@ -68,7 +79,9 @@ def load_model(model, checkpoint, device):
 
     elif model == 'pixelsnail_top':
         use_lr_condition = bool(cfg_get(ckpt_args, 'use_lr_condition', False))
-        model = PixelSNAIL(
+        model_type = cfg_get(ckpt_args, 'model_type', 'pixelsnail')
+        ModelClass = ResNetPrior if model_type == 'resnet' else PixelSNAIL
+        model = ModelClass(
             [32, 32],
             512,
             cfg_get(ckpt_args, 'channel'),
@@ -87,7 +100,9 @@ def load_model(model, checkpoint, device):
         )
 
     elif model == 'pixelsnail_bottom':
-        model = PixelSNAIL(
+        model_type = cfg_get(ckpt_args, 'model_type', 'pixelsnail')
+        ModelClass = ResNetPrior if model_type == 'resnet' else PixelSNAIL
+        model = ModelClass(
             [64, 64],
             512,
             cfg_get(ckpt_args, 'channel'),

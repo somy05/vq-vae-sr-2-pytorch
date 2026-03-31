@@ -1,23 +1,23 @@
 import argparse
+import os
+import sys
+
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-try:
-    from apex import amp
-
-except ImportError:
-    amp = None
-
 from dataset import GameIRSuperResolutionDataset
 from pixelsnail import PixelSNAIL
+from resnet_prior import ResNetPrior
 from scheduler import CycleScheduler
 from vqvae import VQVAE
+import distributed as dist
 
 
 def train(args, epoch, loader, model, vqvae, optimizer, scheduler, device):
-    loader = tqdm(loader)
+    if dist.is_primary():
+        loader = tqdm(loader)
 
     criterion = nn.CrossEntropyLoss()
 
@@ -58,62 +58,47 @@ def train(args, epoch, loader, model, vqvae, optimizer, scheduler, device):
         correct = (pred == target).float()
         accuracy = correct.sum() / target.numel()
 
-        lr = optimizer.param_groups[0]['lr']
+        if dist.is_primary():
+            lr = optimizer.param_groups[0]['lr']
 
-        loader.set_description(
-            (
-                f'epoch: {epoch + 1}; loss: {loss.item():.5f}; '
-                f'acc: {accuracy:.5f}; lr: {lr:.5f}'
+            loader.set_description(
+                (
+                    f'epoch: {epoch + 1}; loss: {loss.item():.5f}; '
+                    f'acc: {accuracy:.5f}; lr: {lr:.5f}'
+                )
             )
-        )
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--batch', type=int, default=32)
-    parser.add_argument('--epoch', type=int, default=420)
-    parser.add_argument('--hier', type=str, default='top')
-    parser.add_argument('--lr', type=float, default=3e-4)
-    parser.add_argument('--channel', type=int, default=256)
-    parser.add_argument('--n_res_block', type=int, default=4)
-    parser.add_argument('--n_res_channel', type=int, default=256)
-    parser.add_argument('--n_out_res_block', type=int, default=0)
-    parser.add_argument('--n_cond_res_block', type=int, default=3)
-    parser.add_argument('--dropout', type=float, default=0.1)
-    parser.add_argument('--size', type=int, default=256)
-    parser.add_argument('--scale', type=int, default=2)
-    parser.add_argument('--use_lr_condition', action='store_true')
-    parser.add_argument('--amp', type=str, default='O0')
-    parser.add_argument('--sched', type=str)
-    parser.add_argument('--ckpt', type=str)
-    parser.add_argument('--vqvae_ckpt', type=str, required=True)
-    parser.add_argument('--lr_path', type=str, required=True)
-    parser.add_argument('--hr_path', type=str, required=True)
+def main(args):
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    args = parser.parse_args()
-
-    print(args)
-
-    device = (
-        'mps'
-        if torch.backends.mps.is_available()
-        else ('cuda' if torch.cuda.is_available() else 'cpu')
-    )
+    args.distributed = dist.get_world_size() > 1
 
     dataset = GameIRSuperResolutionDataset(
         lr_dir=args.lr_path,
         hr_dir=args.hr_path,
+        root=args.root,
+        lr_res=args.lr_res,
+        hr_res=args.hr_res,
+        suffix=args.suffix,
         hr_patch_size=args.size,
         scale=args.scale,
         augment=True,
-        patch_per_image=4
+        patch_per_image=4,
     )
+    sampler = dist.data_sampler(dataset, shuffle=True, distributed=args.distributed)
     loader = DataLoader(
-        dataset, batch_size=args.batch, shuffle=True, num_workers=4, drop_last=True
+        dataset,
+        batch_size=args.batch,
+        sampler=sampler,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=True,
     )
 
     vqvae = VQVAE()
-    vqvae.load_state_dict(torch.load(args.vqvae_ckpt, map_location=device))
+    vqvae_ckpt = torch.load(args.vqvae_ckpt, map_location=device)
+    vqvae.load_state_dict(vqvae_ckpt['model'] if 'model' in vqvae_ckpt else vqvae_ckpt)
     vqvae = vqvae.to(device)
     vqvae.eval()
 
@@ -122,8 +107,10 @@ if __name__ == '__main__':
     if args.ckpt is not None:
         ckpt = torch.load(args.ckpt, map_location=device)
 
+    ModelClass = ResNetPrior if args.model_type == 'resnet' else PixelSNAIL
+
     if args.hier == 'top':
-        model = PixelSNAIL(
+        model = ModelClass(
             [32, 32],
             512,
             args.channel,
@@ -138,7 +125,7 @@ if __name__ == '__main__':
         )
 
     elif args.hier == 'bottom':
-        model = PixelSNAIL(
+        model = ModelClass(
             [64, 64],
             512,
             args.channel,
@@ -156,17 +143,18 @@ if __name__ == '__main__':
         model.load_state_dict(ckpt['model'])
 
     model = model.to(device)
+
+    if args.distributed:
+        model = nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[dist.get_local_rank()],
+            output_device=dist.get_local_rank(),
+        )
+
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
-    use_cuda_parallel = device == 'cuda' and torch.cuda.device_count() > 1
-
-    if amp is not None and device == 'cuda':
-        model, optimizer = amp.initialize(model, optimizer, opt_level=args.amp)
-
-    if use_cuda_parallel:
-        model = nn.DataParallel(model)
-
-    model = model.to(device)
+    if 'optimizer' in ckpt:
+        optimizer.load_state_dict(ckpt['optimizer'])
 
     scheduler = None
     if args.sched == 'cycle':
@@ -175,8 +163,62 @@ if __name__ == '__main__':
         )
 
     for i in range(args.epoch):
+        if args.distributed:
+            sampler.set_epoch(i)
+
         train(args, i, loader, model, vqvae, optimizer, scheduler, device)
-        torch.save(
-            {'model': model.module.state_dict() if use_cuda_parallel else model.state_dict(), 'args': vars(args)},
-            f'checkpoint/pixelsnail_{args.hier}_{str(i + 1).zfill(3)}.pt',
-        )
+
+        if dist.is_primary():
+            model_state = model.module.state_dict() if args.distributed else model.state_dict()
+            torch.save(
+                {
+                    'model': model_state,
+                    'optimizer': optimizer.state_dict(),
+                    'args': vars(args),
+                    'epoch': i + 1,
+                },
+                f'checkpoint/pixelsnail_{args.hier}_{str(i + 1).zfill(3)}.pt',
+            )
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--n_gpu', type=int, default=1)
+
+    port = (
+        2 ** 15
+        + 2 ** 14
+        + hash(os.getuid() if sys.platform != 'win32' else 1) % 2 ** 14
+    )
+    parser.add_argument('--dist_url', default=f'tcp://127.0.0.1:{port}')
+
+    parser.add_argument('--batch', type=int, default=32)
+    parser.add_argument('--epoch', type=int, default=420)
+    parser.add_argument('--hier', type=str, default='top')
+    parser.add_argument('--lr', type=float, default=3e-4)
+    parser.add_argument('--channel', type=int, default=256)
+    parser.add_argument('--n_res_block', type=int, default=4)
+    parser.add_argument('--n_res_channel', type=int, default=256)
+    parser.add_argument('--n_out_res_block', type=int, default=0)
+    parser.add_argument('--n_cond_res_block', type=int, default=3)
+    parser.add_argument('--dropout', type=float, default=0.1)
+    parser.add_argument('--size', type=int, default=256)
+    parser.add_argument('--scale', type=int, default=2)
+    parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--use_lr_condition', action='store_true')
+    parser.add_argument('--model_type', type=str, default='resnet', choices=['pixelsnail', 'resnet'])
+    parser.add_argument('--sched', type=str)
+    parser.add_argument('--ckpt', type=str)
+    parser.add_argument('--vqvae_ckpt', type=str, required=True)
+    parser.add_argument('--lr_path', type=str, default=None)
+    parser.add_argument('--hr_path', type=str, default=None)
+    parser.add_argument('--root', type=str, default=None, help='GameIR dataset root (nested mode)')
+    parser.add_argument('--lr_res', type=str, default='720p', help='LR resolution folder name')
+    parser.add_argument('--hr_res', type=str, default='1440p', help='HR resolution folder name')
+    parser.add_argument('--suffix', type=str, default='_rgb.png', help='Image filename suffix filter')
+
+    args = parser.parse_args()
+
+    print(args)
+
+    dist.launch(main, args.n_gpu, 1, 0, args.dist_url, args=(args,))
