@@ -66,7 +66,8 @@ def train(epoch, loader, model, optimizer, scheduler, device):
             if i % 100 == 0:
                 model.eval()
 
-                sample = img[:sample_size]
+                n = min(sample_size, img.shape[0])
+                sample = img[:n]
 
                 with torch.no_grad():
                     out, _ = model(sample)
@@ -74,7 +75,7 @@ def train(epoch, loader, model, optimizer, scheduler, device):
                 utils.save_image(
                     torch.cat([sample, out], 0),
                     f"sample/{str(epoch + 1).zfill(5)}_{str(i).zfill(5)}.png",
-                    nrow=sample_size,
+                    nrow=n,
                     normalize=True,
                     value_range=(-1, 1),
                 )
