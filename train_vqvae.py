@@ -128,7 +128,7 @@ def main(args):
             model.module.load_state_dict(model_state)
         else:
             model.load_state_dict(model_state)
-        if 'optimizer' in ckpt:
+        if 'optimizer' in ckpt and not args.reset_lr:
             optimizer.load_state_dict(ckpt['optimizer'])
         if 'epoch' in ckpt:
             start_epoch = ckpt['epoch']
@@ -175,6 +175,7 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--sched", type=str)
     parser.add_argument("--ckpt", type=str, default=None)
+    parser.add_argument("--reset_lr", action="store_true", help="Reset learning rate when resuming from checkpoint")
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--lr_path", type=str, default=None)
     parser.add_argument("--hr_path", type=str, default=None)
