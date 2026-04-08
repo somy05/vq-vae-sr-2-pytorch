@@ -50,6 +50,8 @@ def train(args, epoch, loader, model, vqvae, optimizer, scheduler, device):
         loss = criterion(out, target)
         loss.backward()
 
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
         if scheduler is not None:
             scheduler.step()
         optimizer.step()
