@@ -21,6 +21,10 @@ def train(args, epoch, loader, model, vqvae, optimizer, scheduler, device):
 
     criterion = nn.CrossEntropyLoss()
 
+    loss_sum = 0.0
+    acc_sum = 0.0
+    batch_count = 0
+
     for i, (lr_img, hr_img) in enumerate(loader):
         model.zero_grad()
 
@@ -62,11 +66,15 @@ def train(args, epoch, loader, model, vqvae, optimizer, scheduler, device):
 
         if dist.is_primary():
             lr = optimizer.param_groups[0]['lr']
+            loss_sum += loss.item()
+            acc_sum += accuracy.item()
+            batch_count += 1
 
             loader.set_description(
                 (
                     f'epoch: {epoch + 1}; loss: {loss.item():.5f}; '
-                    f'acc: {accuracy:.5f}; lr: {lr:.5f}'
+                    f'acc: {accuracy.item():.5f}; avg loss: {loss_sum / batch_count:.5f}; '
+                    f'avg acc: {acc_sum / batch_count:.5f}; lr: {lr:.5f}'
                 )
             )
 
