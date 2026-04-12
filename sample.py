@@ -39,12 +39,22 @@ def sample_model(model, device, batch, size, temperature, condition=None):
     else:
         out, _ = model(row, condition=condition, cache=cache)
         # out is [batch, n_class, height, width]
-        batch_size, n_class, height, width = out.shape
-        out = out.permute(0, 2, 3, 1).reshape(-1, n_class)
-        prob = torch.softmax(out / temperature, 1)
-        sample = torch.multinomial(prob, 1)
-        row = sample.reshape(batch_size, height, width)
+        # Use argmax — much faster than softmax + multinomial on large tensors,
+        # and equivalent to multinomial at low temperatures.
+        row = out.argmax(dim=1)  # [batch, height, width]
 
+    return row
+
+
+@torch.no_grad()
+def sample_model_fp16(model, device, batch, size, condition=None):
+    """FP16 inference for maximum speed. Always uses argmax."""
+    row = torch.zeros(batch, *size, dtype=torch.int64).to(device)
+    if condition is not None:
+        condition = condition.long()
+    with torch.cuda.amp.autocast():
+        out, _ = model(row, condition=condition)
+    row = out.argmax(dim=1)
     return row
 
 

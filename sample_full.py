@@ -35,25 +35,26 @@ def sr_full_image(lr_tensor, vqvae, model_top, model_bottom, device, scale=2, te
     Returns:
         [1, 3, H*scale, W*scale] super-resolved tensor
     """
-    # Step 1: Encode LR image to get LR top codes
-    _, _, _, lr_top, _ = vqvae.encode(lr_tensor)
-    lr_top = lr_top.long()
+    with torch.cuda.amp.autocast():
+        # Step 1: Encode LR image to get LR top codes
+        _, _, _, lr_top, _ = vqvae.encode(lr_tensor)
+        lr_top = lr_top.long()
 
-    # LR top code size (e.g., 160×90 for 1280×720 input)
-    lr_h, lr_w = lr_top.shape[-2:]
-    # HR code sizes = LR code sizes × scale
-    hr_top_size = [lr_h * scale, lr_w * scale]     # e.g., 320×180
-    hr_bottom_size = [lr_h * scale * 2, lr_w * scale * 2]  # e.g., 640×360
+        # LR top code size (e.g., 160×90 for 1280×720 input)
+        lr_h, lr_w = lr_top.shape[-2:]
+        # HR code sizes = LR code sizes × scale
+        hr_top_size = [lr_h * scale, lr_w * scale]     # e.g., 320×180
+        hr_bottom_size = [lr_h * scale * 2, lr_w * scale * 2]  # e.g., 640×360
 
-    # Step 2: Top prior — predict HR top codes from LR top codes
-    pred_top = sample_model(model_top, device, 1, hr_top_size, temp, condition=lr_top)
+        # Step 2: Top prior — predict HR top codes from LR top codes
+        pred_top = sample_model(model_top, device, 1, hr_top_size, temp, condition=lr_top)
 
-    # Step 3: Bottom prior — predict HR bottom codes from predicted top codes
-    pred_bottom = sample_model(model_bottom, device, 1, hr_bottom_size, temp, condition=pred_top)
+        # Step 3: Bottom prior — predict HR bottom codes from predicted top codes
+        pred_bottom = sample_model(model_bottom, device, 1, hr_bottom_size, temp, condition=pred_top)
 
-    # Step 4: Decode both levels back to image
-    decoded = vqvae.decode_code(pred_top, pred_bottom)
-    decoded = decoded.clamp(-1, 1)
+        # Step 4: Decode both levels back to image
+        decoded = vqvae.decode_code(pred_top, pred_bottom)
+        decoded = decoded.float().clamp(-1, 1)
 
     return decoded
 
