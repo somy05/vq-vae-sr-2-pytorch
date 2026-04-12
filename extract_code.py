@@ -26,7 +26,7 @@ def extract_codes(loader, model, device):
     all_bottom = []
     all_lr_top = []
 
-    for lr_img, hr_img, _ in tqdm(loader, desc='Extracting codes'):
+    for lr_img, hr_img in tqdm(loader, desc='Extracting codes'):
         lr_img = lr_img.to(device)
         hr_img = hr_img.to(device)
 
