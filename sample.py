@@ -107,6 +107,9 @@ def load_model(model, checkpoint, device):
             if use_lr_condition
             else 0,
             n_out_res_block=cfg_get(ckpt_args, 'n_out_res_block', 0),
+            cond_embed_dim=cfg_get(ckpt_args, 'cond_embed_dim', 0)
+            if use_lr_condition
+            else 0,
         )
 
     elif model == 'pixelsnail_bottom':
@@ -124,6 +127,7 @@ def load_model(model, checkpoint, device):
             dropout=cfg_get(ckpt_args, 'dropout'),
             n_cond_res_block=cfg_get(ckpt_args, 'n_cond_res_block'),
             cond_res_channel=cfg_get(ckpt_args, 'n_res_channel'),
+            cond_embed_dim=cfg_get(ckpt_args, 'cond_embed_dim', 0),
         )
         
     if 'model' in ckpt:

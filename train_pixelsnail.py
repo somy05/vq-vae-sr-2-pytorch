@@ -132,6 +132,7 @@ def main(args):
             n_cond_res_block=args.n_cond_res_block if args.use_lr_condition else 0,
             cond_res_channel=args.n_res_channel if args.use_lr_condition else 0,
             n_out_res_block=args.n_out_res_block,
+            cond_embed_dim=args.cond_embed_dim if args.use_lr_condition else 0,
         )
 
     elif args.hier == 'bottom':
@@ -147,6 +148,7 @@ def main(args):
             dropout=args.dropout,
             n_cond_res_block=args.n_cond_res_block,
             cond_res_channel=args.n_res_channel,
+            cond_embed_dim=args.cond_embed_dim,
         )
 
     if 'model' in ckpt:
@@ -206,11 +208,13 @@ if __name__ == '__main__':
     parser.add_argument('--epoch', type=int, default=420)
     parser.add_argument('--hier', type=str, default='top')
     parser.add_argument('--lr', type=float, default=3e-4)
-    parser.add_argument('--channel', type=int, default=256)
-    parser.add_argument('--n_res_block', type=int, default=4)
-    parser.add_argument('--n_res_channel', type=int, default=256)
+    parser.add_argument('--channel', type=int, default=128)
+    parser.add_argument('--n_res_block', type=int, default=2)
+    parser.add_argument('--n_res_channel', type=int, default=128)
     parser.add_argument('--n_out_res_block', type=int, default=0)
     parser.add_argument('--n_cond_res_block', type=int, default=3)
+    parser.add_argument('--cond_embed_dim', type=int, default=64,
+                        help='Embedding dim for condition codes (0=use one-hot)')
     parser.add_argument('--dropout', type=float, default=0.1)
     parser.add_argument('--size', type=int, default=256)
     parser.add_argument('--scale', type=int, default=2)

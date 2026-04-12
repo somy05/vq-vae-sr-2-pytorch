@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from pixelsnail import CondResNet, WNConv2d
+from pixelsnail import WNConv2d
 
 class SimpleResBlock(nn.Module):
     def __init__(self, channel, kernel_size, dropout=0.1):
@@ -26,36 +26,39 @@ class ResNetPrior(nn.Module):
         n_class,
         channel,
         kernel_size,
-        n_block=0, # unused, kept for compatibility
-        n_res_block=4,
-        res_channel=0, # unused, kept for compatibility
-        attention=False, # unused
+        n_block=0,             # unused, kept for API compatibility
+        n_res_block=2,         # reduced from 4 for speed
+        res_channel=0,         # unused, kept for API compatibility
+        attention=False,       # unused
         dropout=0.1,
-        n_cond_res_block=0,
-        cond_res_channel=0,
-        cond_res_kernel=3,
-        n_out_res_block=0, # unused
+        n_cond_res_block=0,    # unused (embedding replaces CondResNet)
+        cond_res_channel=0,    # unused (embedding replaces CondResNet)
+        cond_res_kernel=3,     # unused
+        n_out_res_block=0,     # unused
+        cond_embed_dim=64,     # embedding dimension for condition codes
     ):
         super().__init__()
         self.shape = shape
         self.n_class = n_class
         self.is_autoregressive = False
 
-        self.cond_resnet = None
-        if n_cond_res_block > 0:
-            self.cond_resnet = CondResNet(
-                n_class, cond_res_channel, cond_res_kernel, n_cond_res_block
+        # Condition processing via learned embedding (replaces one-hot + CondResNet).
+        # nn.Embedding is a simple table lookup — zero compute cost compared to
+        # the old F.one_hot which created a massive 512-channel sparse tensor.
+        self.has_condition = cond_embed_dim > 0
+        if self.has_condition:
+            self.cond_embedding = nn.Embedding(n_class, cond_embed_dim)
+            self.cond_conv = nn.Sequential(
+                nn.Conv2d(cond_embed_dim, channel, 3, padding=1),
+                nn.ELU(),
+                nn.Conv2d(channel, channel, 3, padding=1),
             )
+            self.merge = WNConv2d(channel + channel, channel, 1)
 
         self.uncond_embedding = nn.Parameter(torch.randn(1, channel, 1, 1))
 
-        if cond_res_channel > 0:
-            self.merge = WNConv2d(channel + cond_res_channel, channel, 1)
-        else:
-            self.merge = None
-
         resblocks = []
-        for i in range(n_res_block):
+        for _ in range(n_res_block):
             resblocks.append(
                 SimpleResBlock(channel, kernel_size, dropout=dropout)
             )
@@ -76,17 +79,18 @@ class ResNetPrior(nn.Module):
         
         x = self.uncond_embedding.expand(batch, -1, height, width)
 
-        if condition is not None:
-            c = F.one_hot(condition, self.n_class).permute(0, 3, 1, 2).type_as(x)
-            if self.cond_resnet is not None:
-                c = self.cond_resnet(c)
-                
+        if condition is not None and self.has_condition:
+            # Learned embedding lookup — replaces the expensive F.one_hot
+            c = self.cond_embedding(condition)      # [B, H_c, W_c, embed_dim]
+            c = c.permute(0, 3, 1, 2)               # [B, embed_dim, H_c, W_c]
+
             if c.shape[-1] < width:
                 c = F.interpolate(c, size=(height, width), mode='nearest')
                 
-            if self.merge is not None:
-                x = torch.cat([x, c], 1)
-                x = self.merge(x)
+            c = self.cond_conv(c)
+
+            x = torch.cat([x, c], 1)
+            x = self.merge(x)
 
         for block in self.blocks:
             x = block(x)
