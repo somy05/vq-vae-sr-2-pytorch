@@ -173,6 +173,14 @@ def main(args):
         scheduler = CycleScheduler(
             optimizer, args.lr, n_iter=len(loader) * args.epoch, momentum=None
         )
+    elif args.sched == 'onecycle':
+        scheduler = optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=args.lr,
+            total_steps=len(loader) * args.epoch,
+            pct_start=0.1,      # 10% warmup
+            anneal_strategy='cos',
+        )
 
     for i in range(args.epoch):
         if args.distributed:
