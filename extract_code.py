@@ -1,3 +1,15 @@
+"""
+Pre-compute VQ-VAE latent codes for all images in the dataset.
+Saves everything into a single .pt file for fast prior training.
+
+Usage:
+    python extract_code.py \
+        --ckpt checkpoint/vqvae_295.pt \
+        --root /path/to/GameIR-SR \
+        --suffix .rgb.png \
+        --out codes.pt
+"""
+
 import argparse
 
 import torch
@@ -8,34 +20,36 @@ from dataset import GameIRSuperResolutionDataset
 from vqvae import VQVAE
 
 
+@torch.no_grad()
 def extract_codes(loader, model, device):
-    rows = []
+    all_top = []
+    all_bottom = []
+    all_lr_top = []
 
-    with torch.no_grad():
-        for lr_img, hr_img, filename in tqdm(loader):
-            lr_img = lr_img.to(device)
-            hr_img = hr_img.to(device)
+    for lr_img, hr_img, _ in tqdm(loader, desc='Extracting codes'):
+        lr_img = lr_img.to(device)
+        hr_img = hr_img.to(device)
 
-            _, _, _, hr_top, hr_bottom = model.encode(hr_img)
-            _, _, _, lr_top, _ = model.encode(lr_img)
+        _, _, _, hr_top, hr_bottom = model.encode(hr_img)
+        _, _, _, lr_top, _ = model.encode(lr_img)
 
-            for file, top, bottom, top_lr in zip(filename, hr_top, hr_bottom, lr_top):
-                rows.append(
-                    {
-                        'filename': file,
-                        'top': top.cpu(),
-                        'bottom': bottom.cpu(),
-                        'lr_top': top_lr.cpu(),
-                    }
-                )
+        all_top.append(hr_top.cpu())
+        all_bottom.append(hr_bottom.cpu())
+        all_lr_top.append(lr_top.cpu())
 
-    return rows
+    return {
+        'top': torch.cat(all_top, 0),        # [N, 32, 32]
+        'bottom': torch.cat(all_bottom, 0),   # [N, 64, 64]
+        'lr_top': torch.cat(all_lr_top, 0),   # [N, 16, 16]
+    }
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--size', type=int, default=256)
     parser.add_argument('--scale', type=int, default=2)
+    parser.add_argument('--batch', type=int, default=64)
+    parser.add_argument('--num_workers', type=int, default=16)
     parser.add_argument('--ckpt', type=str, required=True)
     parser.add_argument('--lr_path', type=str, default=None)
     parser.add_argument('--hr_path', type=str, default=None)
@@ -47,11 +61,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    device = (
-        'mps'
-        if torch.backends.mps.is_available()
-        else ('cuda' if torch.cuda.is_available() else 'cpu')
-    )
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     dataset = GameIRSuperResolutionDataset(
         lr_dir=args.lr_path,
@@ -62,10 +72,20 @@ if __name__ == '__main__':
         suffix=args.suffix,
         hr_patch_size=args.size,
         scale=args.scale,
-        augment=False,
-        return_name=True,
+        augment=False,       # No augmentation for extraction
+        patch_per_image=1,   # One patch per image
     )
-    loader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=4)
+
+    loader = DataLoader(
+        dataset,
+        batch_size=args.batch,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+    )
+
+    print(f'Dataset: {len(dataset)} images')
+    print(f'Device: {device}')
 
     model = VQVAE()
     ckpt = torch.load(args.ckpt, map_location=device)
@@ -73,6 +93,12 @@ if __name__ == '__main__':
     model = model.to(device)
     model.eval()
 
-    rows = extract_codes(loader, model, device)
-    torch.save(rows, args.out)
-    print(f'Saved {len(rows)} code rows to {args.out}')
+    codes = extract_codes(loader, model, device)
+
+    print(f'\nExtracted shapes:')
+    print(f'  top:    {codes["top"].shape}')
+    print(f'  bottom: {codes["bottom"].shape}')
+    print(f'  lr_top: {codes["lr_top"].shape}')
+
+    torch.save(codes, args.out)
+    print(f'\nSaved to {args.out}')

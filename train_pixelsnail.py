@@ -4,7 +4,7 @@ import sys
 
 import torch
 from torch import nn, optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
 from dataset import GameIRSuperResolutionDataset
@@ -25,19 +25,23 @@ def train(args, epoch, loader, model, vqvae, optimizer, scheduler, device):
     acc_sum = 0.0
     batch_count = 0
 
-    for i, (lr_img, hr_img) in enumerate(loader):
+    for i, batch in enumerate(loader):
         model.zero_grad()
 
-        lr_img = lr_img.to(device)
-        hr_img = hr_img.to(device)
-
-        with torch.no_grad():
-            _, _, _, top, bottom = vqvae.encode(hr_img)
-            _, _, _, lr_top, _ = vqvae.encode(lr_img)
-
-        top = top.long()
-        bottom = bottom.long()
-        lr_top = lr_top.long()
+        if len(batch) == 3:
+            # Pre-computed codes mode: (top, bottom, lr_top)
+            top, bottom, lr_top = [b.to(device).long() for b in batch]
+        else:
+            # Image mode: (lr_img, hr_img) — encode on the fly
+            lr_img, hr_img = batch
+            lr_img = lr_img.to(device)
+            hr_img = hr_img.to(device)
+            with torch.no_grad():
+                _, _, _, top, bottom = vqvae.encode(hr_img)
+                _, _, _, lr_top, _ = vqvae.encode(lr_img)
+            top = top.long()
+            bottom = bottom.long()
+            lr_top = lr_top.long()
 
         if args.hier == 'top':
             target = top
@@ -47,7 +51,6 @@ def train(args, epoch, loader, model, vqvae, optimizer, scheduler, device):
                 out, _ = model(top)
 
         elif args.hier == 'bottom':
-            bottom = bottom.to(device)
             target = bottom
             out, _ = model(bottom, condition=top)
 
@@ -84,33 +87,42 @@ def main(args):
 
     args.distributed = dist.get_world_size() > 1
 
-    dataset = GameIRSuperResolutionDataset(
-        lr_dir=args.lr_path,
-        hr_dir=args.hr_path,
-        root=args.root,
-        lr_res=args.lr_res,
-        hr_res=args.hr_res,
-        suffix=args.suffix,
-        hr_patch_size=args.size,
-        scale=args.scale,
-        augment=True,
-        patch_per_image=4,
-    )
+    if args.codes:
+        # Fast path: load pre-computed codes (no VQ-VAE needed)
+        print(f'Loading pre-computed codes from {args.codes}...')
+        codes = torch.load(args.codes, map_location='cpu')
+        dataset = TensorDataset(codes['top'], codes['bottom'], codes['lr_top'])
+        vqvae = None
+        print(f'Loaded {len(dataset)} code sets')
+    else:
+        # Slow path: encode images on the fly
+        dataset = GameIRSuperResolutionDataset(
+            lr_dir=args.lr_path,
+            hr_dir=args.hr_path,
+            root=args.root,
+            lr_res=args.lr_res,
+            hr_res=args.hr_res,
+            suffix=args.suffix,
+            hr_patch_size=args.size,
+            scale=args.scale,
+            augment=True,
+            patch_per_image=4,
+        )
+        vqvae = VQVAE()
+        vqvae_ckpt = torch.load(args.vqvae_ckpt, map_location=device)
+        vqvae.load_state_dict(vqvae_ckpt['model'] if 'model' in vqvae_ckpt else vqvae_ckpt)
+        vqvae = vqvae.to(device)
+        vqvae.eval()
+
     sampler = dist.data_sampler(dataset, shuffle=True, distributed=args.distributed)
     loader = DataLoader(
         dataset,
         batch_size=args.batch,
         sampler=sampler,
-        num_workers=args.num_workers,
+        num_workers=args.num_workers if not args.codes else 0,
         pin_memory=True,
         drop_last=True,
     )
-
-    vqvae = VQVAE()
-    vqvae_ckpt = torch.load(args.vqvae_ckpt, map_location=device)
-    vqvae.load_state_dict(vqvae_ckpt['model'] if 'model' in vqvae_ckpt else vqvae_ckpt)
-    vqvae = vqvae.to(device)
-    vqvae.eval()
 
     ckpt = {}
 
@@ -231,7 +243,9 @@ if __name__ == '__main__':
     parser.add_argument('--model_type', type=str, default='resnet', choices=['pixelsnail', 'resnet'])
     parser.add_argument('--sched', type=str)
     parser.add_argument('--ckpt', type=str)
-    parser.add_argument('--vqvae_ckpt', type=str, required=True)
+    parser.add_argument('--vqvae_ckpt', type=str, default=None)
+    parser.add_argument('--codes', type=str, default=None,
+                        help='Path to pre-computed codes .pt file (skips VQ-VAE)')
     parser.add_argument('--lr_path', type=str, default=None)
     parser.add_argument('--hr_path', type=str, default=None)
     parser.add_argument('--root', type=str, default=None, help='GameIR dataset root (nested mode)')
