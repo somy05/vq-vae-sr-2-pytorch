@@ -35,28 +35,49 @@ def sr_full_image(lr_tensor, vqvae, model_top, model_bottom, device, scale=2, te
     Returns:
         [1, 3, H*scale, W*scale] super-resolved tensor
     """
+    timings = {}
+
     with torch.cuda.amp.autocast():
         # Step 1: Encode LR image to get LR top codes
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
         _, _, _, lr_top, _ = vqvae.encode(lr_tensor)
         lr_top = lr_top.long()
+        torch.cuda.synchronize()
+        timings['encode'] = (time.perf_counter() - t0) * 1000
 
-        # LR top code size (e.g., 160×90 for 1280×720 input)
         lr_h, lr_w = lr_top.shape[-2:]
-        # HR code sizes = LR code sizes × scale
-        hr_top_size = [lr_h * scale, lr_w * scale]     # e.g., 320×180
-        hr_bottom_size = [lr_h * scale * 2, lr_w * scale * 2]  # e.g., 640×360
+        hr_top_size = [lr_h * scale, lr_w * scale]
+        hr_bottom_size = [lr_h * scale * 2, lr_w * scale * 2]
 
-        # Step 2: Top prior — predict HR top codes from LR top codes
+        # Step 2: Top prior
+        t0 = time.perf_counter()
         pred_top = sample_model(model_top, device, 1, hr_top_size, temp, condition=lr_top)
+        torch.cuda.synchronize()
+        timings['top_prior'] = (time.perf_counter() - t0) * 1000
 
-        # Step 3: Bottom prior — predict HR bottom codes from predicted top codes
-        pred_bottom = sample_model(model_bottom, device, 1, hr_bottom_size, temp, condition=pred_top)
+        # Step 3: Bottom prior -> REPLACED WITH HYBRID APPROACH
+        t0 = time.perf_counter()
+        
+        # Up-sample LR image to HR size using bicubic
+        b, c, h, w = lr_tensor.shape
+        bicubic_hr = F.interpolate(lr_tensor, size=(h * scale, w * scale), mode='bicubic', align_corners=False)
+        
+        # Encode the bicubic image to get reliable bottom texture codes
+        _, _, _, _, bicubic_bottom = vqvae.encode(bicubic_hr)
+        pred_bottom = bicubic_bottom.long()
+        
+        torch.cuda.synchronize()
+        timings['bottom_hybrid'] = (time.perf_counter() - t0) * 1000
 
-        # Step 4: Decode both levels back to image
+        # Step 4: Decode
+        t0 = time.perf_counter()
         decoded = vqvae.decode_code(pred_top, pred_bottom)
         decoded = decoded.float().clamp(-1, 1)
+        torch.cuda.synchronize()
+        timings['decode'] = (time.perf_counter() - t0) * 1000
 
-    return decoded
+    return decoded, timings
 
 
 def benchmark(lr_tensor, vqvae, model_top, model_bottom, device, scale=2,
@@ -66,20 +87,24 @@ def benchmark(lr_tensor, vqvae, model_top, model_bottom, device, scale=2,
 
     # Warmup
     for _ in range(warmup):
-        _ = sr_full_image(lr_tensor, vqvae, model_top, model_bottom, device, scale, temp)
+        _, _ = sr_full_image(lr_tensor, vqvae, model_top, model_bottom, device, scale, temp)
         torch.cuda.synchronize()
 
     # Timed runs
     times = []
+    all_timings = {}
     for i in range(runs):
         torch.cuda.synchronize()
         start = time.perf_counter()
 
-        _ = sr_full_image(lr_tensor, vqvae, model_top, model_bottom, device, scale, temp)
+        _, timings = sr_full_image(lr_tensor, vqvae, model_top, model_bottom, device, scale, temp)
 
         torch.cuda.synchronize()
         elapsed = time.perf_counter() - start
         times.append(elapsed)
+
+        for k, v in timings.items():
+            all_timings.setdefault(k, []).append(v)
 
     avg_ms = sum(times) / len(times) * 1000
     min_ms = min(times) * 1000
@@ -93,6 +118,11 @@ def benchmark(lr_tensor, vqvae, model_top, model_bottom, device, scale=2,
     print(f'Average: {avg_ms:.1f} ms  ({fps:.1f} FPS)')
     print(f'Min:     {min_ms:.1f} ms  ({1000/min_ms:.1f} FPS)')
     print(f'Max:     {max_ms:.1f} ms  ({1000/max_ms:.1f} FPS)')
+    print(f'\nPer-step breakdown (avg):')
+    for k, v in all_timings.items():
+        avg = sum(v) / len(v)
+        pct = avg / avg_ms * 100
+        print(f'  {k:15s}: {avg:6.1f} ms  ({pct:4.1f}%)')
     print(f'{"="*50}')
 
     return avg_ms, fps
@@ -143,11 +173,13 @@ def main():
     # Run SR
     print('\nRunning super-resolution...')
     start = time.perf_counter()
-    sr_output = sr_full_image(lr_tensor, vqvae, model_top, model_bottom,
+    sr_output, timings = sr_full_image(lr_tensor, vqvae, model_top, model_bottom,
                                device, args.scale, args.temp)
     torch.cuda.synchronize()
     elapsed = time.perf_counter() - start
     print(f'Done in {elapsed*1000:.1f} ms')
+    for k, v in timings.items():
+        print(f'  {k}: {v:.1f} ms')
 
     # Crop padding from output
     sr_output = sr_output[:, :, :hr_h, :hr_w]
