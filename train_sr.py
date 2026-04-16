@@ -224,8 +224,8 @@ def main():
             m = model.module if isinstance(model, nn.DataParallel) else model
             save_samples(m, dataset, device, epoch, args.sample_dir)
 
-        # Save checkpoint every 25 epochs and at the end
-        if (epoch + 1) % 25 == 0 or epoch == args.epoch - 1:
+        # Save checkpoint every 10 epochs and at the end
+        if (epoch + 1) % 10 == 0 or epoch == args.epoch - 1:
             m = model.module if isinstance(model, nn.DataParallel) else model
             torch.save({
                 'model': m.state_dict(),
