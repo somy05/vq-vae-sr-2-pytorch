@@ -23,6 +23,7 @@ from torchvision.utils import save_image
 
 from dataset import GameIRSuperResolutionDataset
 from sr_model import DirectSRNet
+from perceptual_loss import PerceptualLoss
 
 
 def calc_psnr(pred, target):
@@ -36,7 +37,8 @@ def calc_psnr(pred, target):
     return 10 * math.log10(1.0 / mse.item())
 
 
-def train_epoch(model, loader, optimizer, scheduler, device, epoch):
+def train_epoch(model, loader, optimizer, scheduler, device, epoch,
+                perceptual_fn=None, lambda_perceptual=0.0):
     model.train()
     pbar = tqdm(loader)
     loss_fn = nn.L1Loss()
@@ -51,6 +53,10 @@ def train_epoch(model, loader, optimizer, scheduler, device, epoch):
 
         pred = model(lr_img)
         loss = loss_fn(pred, hr_img)
+
+        if perceptual_fn is not None and lambda_perceptual > 0:
+            p_loss = perceptual_fn(pred, hr_img)
+            loss = loss + lambda_perceptual * p_loss
 
         optimizer.zero_grad()
         loss.backward()
@@ -126,6 +132,8 @@ def main():
                         help='Resume from checkpoint')
     parser.add_argument('--save_dir', type=str, default='checkpoint')
     parser.add_argument('--sample_dir', type=str, default='sr_samples')
+    parser.add_argument('--lambda_perceptual', type=float, default=0.0,
+                        help='Weight for perceptual loss (0 = L1 only)')
     args = parser.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -195,10 +203,20 @@ def main():
 
     os.makedirs(args.save_dir, exist_ok=True)
 
+    # Perceptual loss (optional)
+    perceptual_fn = None
+    if args.lambda_perceptual > 0:
+        perceptual_fn = PerceptualLoss().to(device)
+        print(f'Using perceptual loss (λ={args.lambda_perceptual})')
+    else:
+        print('Using L1 loss only')
+
     # Training loop
     for epoch in range(start_epoch, args.epoch):
         avg_loss, avg_psnr = train_epoch(
-            model, loader, optimizer, scheduler, device, epoch
+            model, loader, optimizer, scheduler, device, epoch,
+            perceptual_fn=perceptual_fn,
+            lambda_perceptual=args.lambda_perceptual,
         )
 
         # Save samples every 10 epochs
