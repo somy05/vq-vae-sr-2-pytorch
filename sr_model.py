@@ -42,7 +42,7 @@ class DirectSRNet(nn.Module):
         n_channels: feature channels (default 64)
         n_blocks: number of residual blocks (default 16)
     """
-    def __init__(self, scale=2, n_channels=64, n_blocks=16):
+    def __init__(self, scale=2, n_channels=64, n_blocks=16, fast_tail=False):
         super().__init__()
         self.scale = scale
 
@@ -52,13 +52,16 @@ class DirectSRNet(nn.Module):
         # Residual body — all computation in LR space for speed
         body = [ResBlock(n_channels) for _ in range(n_blocks)]
         self.body = nn.Sequential(*body)
-        self.body_tail = nn.Conv2d(n_channels, n_channels, 3, padding=1)
+        # fast_tail=True uses 1×1 convs where spatial context is less critical
+        tail_k = 1 if fast_tail else 3
+        tail_p = 0 if fast_tail else 1
+        self.body_tail = nn.Conv2d(n_channels, n_channels, tail_k, padding=tail_p)
 
         # Upscale: LR features → HR image via sub-pixel convolution
         self.upscale = nn.Sequential(
-            nn.Conv2d(n_channels, n_channels * scale * scale, 3, padding=1),
+            nn.Conv2d(n_channels, n_channels * scale * scale, tail_k, padding=tail_p),
             nn.PixelShuffle(scale),
-            nn.Conv2d(n_channels, 3, 3, padding=1),
+            nn.Conv2d(n_channels, 3, tail_k, padding=tail_p),
         )
 
     def forward(self, x, active_blocks=None):
