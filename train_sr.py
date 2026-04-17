@@ -132,6 +132,8 @@ def main():
                         help='Resume from checkpoint')
     parser.add_argument('--save_dir', type=str, default='checkpoint')
     parser.add_argument('--sample_dir', type=str, default='sr_samples')
+    parser.add_argument('--patch_per_image', type=int, default=1,
+                        help='Random crops per image (more = more data, slower I/O)')
     parser.add_argument('--lambda_perceptual', type=float, default=0.0,
                         help='Weight for perceptual loss (0 = L1 only)')
     args = parser.parse_args()
@@ -148,7 +150,7 @@ def main():
         hr_patch_size=args.size,
         scale=args.scale,
         augment=True,
-        patch_per_image=4,
+        patch_per_image=args.patch_per_image,
     )
     print(f'Dataset: {len(dataset)} patches')
 
