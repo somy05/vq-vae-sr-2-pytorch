@@ -61,7 +61,13 @@ class DirectSRNet(nn.Module):
             nn.Conv2d(n_channels, 3, 3, padding=1),
         )
 
-    def forward(self, x):
+    def forward(self, x, active_blocks=None):
+        """
+        Args:
+            x: LR input image
+            active_blocks: number of residual blocks to use (None = all).
+                           Fewer blocks = faster but lower quality.
+        """
         # Bicubic baseline for global residual learning
         bicubic = F.interpolate(
             x, scale_factor=self.scale, mode='bicubic', align_corners=False
@@ -71,10 +77,19 @@ class DirectSRNet(nn.Module):
         head = self.head(x)
 
         # Residual blocks with long skip connection
-        body = self.body(head)
+        if active_blocks is not None:
+            body = head
+            for i, block in enumerate(self.body):
+                if i >= active_blocks:
+                    break
+                body = block(body)
+        else:
+            body = self.body(head)
+
         body = self.body_tail(body)
         feat = head + body
 
         # Upscale and add residual to bicubic
         out = self.upscale(feat)
         return out + bicubic
+
