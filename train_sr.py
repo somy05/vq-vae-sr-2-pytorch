@@ -134,6 +134,8 @@ def main():
     parser.add_argument('--sample_dir', type=str, default='sr_samples')
     parser.add_argument('--patch_per_image', type=int, default=1,
                         help='Random crops per image (more = more data, slower I/O)')
+    parser.add_argument('--fast_tail', action='store_true',
+                        help='Use 1x1 final conv (faster at HR resolution)')
     parser.add_argument('--lambda_perceptual', type=float, default=0.0,
                         help='Weight for perceptual loss (0 = L1 only)')
     args = parser.parse_args()
@@ -168,6 +170,7 @@ def main():
         scale=args.scale,
         n_channels=args.n_channels,
         n_blocks=args.n_blocks,
+        fast_tail=args.fast_tail,
     )
 
     n_params = sum(p.numel() for p in model.parameters())

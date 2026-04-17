@@ -38,17 +38,17 @@ def sr_full_image(lr_tensor, vqvae, model_top, model_bottom, device, scale=2, te
     timings = {}
 
     with torch.cuda.amp.autocast():
-        # Step 1: Encode LR image to get LR top codes
+        # Step 1: Encode LR image to get LR top AND bottom codes
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        _, _, _, lr_top, _ = vqvae.encode(lr_tensor)
+        _, _, _, lr_top, lr_bottom = vqvae.encode(lr_tensor)
         lr_top = lr_top.long()
+        lr_bottom = lr_bottom.long()
         torch.cuda.synchronize()
         timings['encode'] = (time.perf_counter() - t0) * 1000
 
         lr_h, lr_w = lr_top.shape[-2:]
         hr_top_size = [lr_h * scale, lr_w * scale]
-        hr_bottom_size = [lr_h * scale * 2, lr_w * scale * 2]
 
         # Step 2: Top prior
         t0 = time.perf_counter()
@@ -56,19 +56,13 @@ def sr_full_image(lr_tensor, vqvae, model_top, model_bottom, device, scale=2, te
         torch.cuda.synchronize()
         timings['top_prior'] = (time.perf_counter() - t0) * 1000
 
-        # Step 3: Bottom prior -> REPLACED WITH HYBRID APPROACH
+        # Step 3: Upsample LR bottom codes to HR size (instant, no model needed)
         t0 = time.perf_counter()
-        
-        # Up-sample LR image to HR size using bicubic
-        b, c, h, w = lr_tensor.shape
-        bicubic_hr = F.interpolate(lr_tensor, size=(h * scale, w * scale), mode='bicubic', align_corners=False)
-        
-        # Encode the bicubic image to get reliable bottom texture codes
-        _, _, _, _, bicubic_bottom = vqvae.encode(bicubic_hr)
-        pred_bottom = bicubic_bottom.long()
-        
+        pred_bottom = lr_bottom.float().unsqueeze(1)
+        pred_bottom = F.interpolate(pred_bottom, scale_factor=scale, mode='nearest')
+        pred_bottom = pred_bottom.squeeze(1).long()
         torch.cuda.synchronize()
-        timings['bottom_hybrid'] = (time.perf_counter() - t0) * 1000
+        timings['bottom_upsample'] = (time.perf_counter() - t0) * 1000
 
         # Step 4: Decode
         t0 = time.perf_counter()
