@@ -87,6 +87,7 @@ def main():
         scale=ckpt_args.get('scale', 2),
         n_channels=ckpt_args.get('n_channels', 64),
         n_blocks=ckpt_args.get('n_blocks', 16),
+        fast_tail=ckpt_args.get('fast_tail', False),
     )
     model.load_state_dict(ckpt['model'])
     model = model.to(device)
