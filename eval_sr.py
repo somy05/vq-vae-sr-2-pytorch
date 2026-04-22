@@ -44,6 +44,45 @@ def calc_psnr(pred, target):
     return 10 * math.log10(255 ** 2 / mse.item())
 
 
+def calc_ssim(pred, target, window_size=11):
+    """SSIM for images in [-1, 1] range.
+
+    Uses a Gaussian-weighted sliding window approach.
+    Returns a scalar SSIM value in [0, 1].
+    """
+    # Convert to [0, 1]
+    pred = ((pred + 1) / 2).clamp(0, 1)
+    target = ((target + 1) / 2).clamp(0, 1)
+
+    C1 = 0.01 ** 2
+    C2 = 0.03 ** 2
+
+    # Create Gaussian window
+    coords = torch.arange(window_size, dtype=torch.float32) - window_size // 2
+    g = torch.exp(-(coords ** 2) / (2 * 1.5 ** 2))
+    g = g / g.sum()
+    window = g.unsqueeze(1) * g.unsqueeze(0)  # 2D Gaussian
+    window = window.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
+    window = window.expand(pred.size(1), 1, -1, -1).to(pred.device)
+
+    pad = window_size // 2
+    mu1 = F.conv2d(pred, window, padding=pad, groups=pred.size(1))
+    mu2 = F.conv2d(target, window, padding=pad, groups=target.size(1))
+
+    mu1_sq = mu1 ** 2
+    mu2_sq = mu2 ** 2
+    mu1_mu2 = mu1 * mu2
+
+    sigma1_sq = F.conv2d(pred * pred, window, padding=pad, groups=pred.size(1)) - mu1_sq
+    sigma2_sq = F.conv2d(target * target, window, padding=pad, groups=target.size(1)) - mu2_sq
+    sigma12 = F.conv2d(pred * target, window, padding=pad, groups=pred.size(1)) - mu1_mu2
+
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / \
+               ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+
+    return ssim_map.mean().item()
+
+
 @torch.no_grad()
 def sr_image(model, lr_tensor, device):
     """Run SR on a single image."""
@@ -109,9 +148,11 @@ def load_and_prepare(image_path, normalize=True):
 
 @torch.no_grad()
 def eval_batch(model, pairs, device, scale, output_dir=None, save_samples=5):
-    """Evaluate model on all image pairs, returning average PSNR."""
+    """Evaluate model on all image pairs, returning average PSNR and SSIM."""
     psnr_bicubic_list = []
     psnr_sr_list = []
+    ssim_bicubic_list = []
+    ssim_sr_list = []
     saved = 0
 
     if output_dir:
@@ -141,11 +182,17 @@ def eval_batch(model, pairs, device, scale, output_dir=None, save_samples=5):
         psnr_bicubic_list.append(psnr_bic)
         psnr_sr_list.append(psnr_sr)
 
+        # Compute SSIM
+        ssim_bic = calc_ssim(bicubic, hr_tensor)
+        ssim_sr = calc_ssim(sr_output, hr_tensor)
+        ssim_bicubic_list.append(ssim_bic)
+        ssim_sr_list.append(ssim_sr)
+
         # Progress
         delta = psnr_sr - psnr_bic
         print(f'  [{i+1:4d}/{len(pairs)}] {name:50s}  '
-              f'Bicubic: {psnr_bic:.2f} dB  SR: {psnr_sr:.2f} dB  '
-              f'Δ: {delta:+.2f} dB')
+              f'PSNR: {psnr_sr:.2f} dB (Δ{delta:+.2f})  '
+              f'SSIM: {ssim_sr:.4f}')
 
         # Save a few sample comparisons
         if output_dir and saved < save_samples:
@@ -157,10 +204,13 @@ def eval_batch(model, pairs, device, scale, output_dir=None, save_samples=5):
                        normalize=True, value_range=(-1, 1))
             saved += 1
 
-    avg_bic = sum(psnr_bicubic_list) / len(psnr_bicubic_list)
-    avg_sr = sum(psnr_sr_list) / len(psnr_sr_list)
+    avg_bic_psnr = sum(psnr_bicubic_list) / len(psnr_bicubic_list)
+    avg_sr_psnr = sum(psnr_sr_list) / len(psnr_sr_list)
+    avg_bic_ssim = sum(ssim_bicubic_list) / len(ssim_bicubic_list)
+    avg_sr_ssim = sum(ssim_sr_list) / len(ssim_sr_list)
 
-    return avg_bic, avg_sr, psnr_bicubic_list, psnr_sr_list
+    return (avg_bic_psnr, avg_sr_psnr, psnr_bicubic_list, psnr_sr_list,
+            avg_bic_ssim, avg_sr_ssim, ssim_bicubic_list, ssim_sr_list)
 
 
 def main():
@@ -225,7 +275,8 @@ def main():
         print(f'\nFound {len(pairs)} image pairs in test set')
         print(f'{"=" * 70}')
 
-        avg_bic, avg_sr, all_bic, all_sr = eval_batch(
+        (avg_bic_psnr, avg_sr_psnr, all_bic, all_sr,
+         avg_bic_ssim, avg_sr_ssim, all_bic_ssim, all_sr_ssim) = eval_batch(
             model, pairs, device, scale,
             output_dir=args.output_dir,
             save_samples=args.save_samples,
@@ -234,15 +285,18 @@ def main():
         print(f'\n{"=" * 70}')
         print(f'RESULTS ({len(pairs)} images)')
         print(f'{"=" * 70}')
-        print(f'  Average PSNR (Bicubic):  {avg_bic:.2f} dB')
-        print(f'  Average PSNR (SR ours):  {avg_sr:.2f} dB')
-        print(f'  Average Δ:               {avg_sr - avg_bic:+.2f} dB')
+        print(f'  Average PSNR (Bicubic):  {avg_bic_psnr:.2f} dB')
+        print(f'  Average PSNR (SR ours):  {avg_sr_psnr:.2f} dB')
+        print(f'  Average PSNR Δ:          {avg_sr_psnr - avg_bic_psnr:+.2f} dB')
+        print(f'  Average SSIM (Bicubic):  {avg_bic_ssim:.4f}')
+        print(f'  Average SSIM (SR ours):  {avg_sr_ssim:.4f}')
+        print(f'  Average SSIM Δ:          {avg_sr_ssim - avg_bic_ssim:+.4f}')
         print(f'{"=" * 70}')
 
         # Per-image stats
         deltas = [s - b for s, b in zip(all_sr, all_bic)]
-        print(f'\n  Best  Δ: {max(deltas):+.2f} dB')
-        print(f'  Worst Δ: {min(deltas):+.2f} dB')
+        print(f'\n  Best  PSNR Δ: {max(deltas):+.2f} dB')
+        print(f'  Worst PSNR Δ: {min(deltas):+.2f} dB')
         improved = sum(1 for d in deltas if d > 0)
         print(f'  Improved: {improved}/{len(deltas)} images '
               f'({100*improved/len(deltas):.1f}%)')
@@ -304,11 +358,17 @@ def main():
 
         psnr_bicubic = calc_psnr(bicubic, hr_gt_tensor)
         psnr_sr = calc_psnr(sr_output.cpu(), hr_gt_tensor)
+        ssim_bicubic = calc_ssim(bicubic, hr_gt_tensor)
+        ssim_sr = calc_ssim(sr_output.cpu(), hr_gt_tensor)
 
         print(f'\nPSNR:')
         print(f'  Bicubic:   {psnr_bicubic:.2f} dB')
         print(f'  SR (ours): {psnr_sr:.2f} dB')
         print(f'  Δ:         {psnr_sr - psnr_bicubic:+.2f} dB')
+        print(f'\nSSIM:')
+        print(f'  Bicubic:   {ssim_bicubic:.4f}')
+        print(f'  SR (ours): {ssim_sr:.4f}')
+        print(f'  Δ:         {ssim_sr - ssim_bicubic:+.4f}')
 
         images.append(hr_gt_tensor.squeeze(0))
 
