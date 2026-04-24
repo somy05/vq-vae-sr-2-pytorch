@@ -31,7 +31,7 @@ import torchvision.transforms.functional as TF
 from torchvision.utils import save_image
 from PIL import Image
 
-from sr_model import DirectSRNet
+from sr_model import DirectSRNet, inject_lora, load_lora_weights
 
 
 def calc_psnr(pred, target):
@@ -153,7 +153,8 @@ def eval_batch(model, pairs, device, scale, output_dir=None, save_samples=5):
     psnr_sr_list = []
     ssim_bicubic_list = []
     ssim_sr_list = []
-    saved = 0
+    # Collect data for saving best samples later
+    all_results = []
 
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
@@ -194,15 +195,28 @@ def eval_batch(model, pairs, device, scale, output_dir=None, save_samples=5):
               f'PSNR: {psnr_sr:.2f} dB (Δ{delta:+.2f})  '
               f'SSIM: {ssim_sr:.4f}')
 
-        # Save a few sample comparisons
-        if output_dir and saved < save_samples:
-            comparison = [bicubic.squeeze(0), sr_output.squeeze(0),
-                          hr_tensor.squeeze(0)]
-            safe_name = name.replace('/', '_').replace('\\', '_')
-            save_path = os.path.join(output_dir, f'sample_{safe_name}')
+        # Store for best-sample selection
+        if output_dir and save_samples > 0:
+            all_results.append({
+                'name': name,
+                'delta': delta,
+                'bicubic': bicubic.squeeze(0),
+                'sr': sr_output.squeeze(0),
+                'gt': hr_tensor.squeeze(0),
+            })
+
+    # Save the top-N samples with highest PSNR improvement
+    if output_dir and save_samples > 0 and all_results:
+        all_results.sort(key=lambda r: r['delta'], reverse=True)
+        best_dir = os.path.join(output_dir, 'best')
+        os.makedirs(best_dir, exist_ok=True)
+        for rank, r in enumerate(all_results[:save_samples]):
+            safe_name = r['name'].replace('/', '_').replace('\\', '_')
+            save_path = os.path.join(best_dir, f'{rank+1}_delta{r["delta"]:+.2f}_{safe_name}')
+            comparison = [r['bicubic'], r['sr'], r['gt']]
             save_image(comparison, save_path, nrow=3,
                        normalize=True, value_range=(-1, 1))
-            saved += 1
+        print(f'\n  Saved top {min(save_samples, len(all_results))} best samples to: {best_dir}/')
 
     avg_bic_psnr = sum(psnr_bicubic_list) / len(psnr_bicubic_list)
     avg_sr_psnr = sum(psnr_sr_list) / len(psnr_sr_list)
@@ -235,6 +249,8 @@ def main():
                         help='Directory for batch evaluation outputs')
     parser.add_argument('--do_benchmark', action='store_true')
     parser.add_argument('--benchmark_runs', type=int, default=50)
+    parser.add_argument('--lora', type=str, default=None,
+                        help='Path to LoRA weights file')
     args = parser.parse_args()
 
     if not args.lr_image and not args.test_root:
@@ -255,6 +271,16 @@ def main():
     model.load_state_dict(ckpt['model'])
     model = model.to(device)
     model.eval()
+
+    # Load LoRA if provided
+    if args.lora:
+        print(f'Loading LoRA: {args.lora}')
+        lora_ckpt = torch.load(args.lora, map_location=device)
+        rank = lora_ckpt.get('rank', 4)
+        alpha = lora_ckpt.get('alpha', 1.0)
+        model = inject_lora(model, rank=rank, alpha=alpha)
+        load_lora_weights(model, args.lora, device=device)
+        model.eval()
 
     n_params = sum(p.numel() for p in model.parameters())
     scale = ckpt_args.get('scale', 2)
