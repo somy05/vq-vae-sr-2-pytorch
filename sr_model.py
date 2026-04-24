@@ -13,6 +13,83 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class LoRAConv2d(nn.Module):
+    """Low-Rank Adaptation wrapper for Conv2d layers.
+
+    Adds a trainable low-rank path in parallel to a frozen convolution:
+        output = frozen_conv(x) + (alpha/rank) * B(A(x))
+
+    A projects from C_in → rank, B projects from rank → C_out.
+    B is initialised to zeros so the output is identical to the
+    original convolution at injection time.
+    """
+
+    def __init__(self, original_conv, rank=4, alpha=1.0):
+        super().__init__()
+        self.original_conv = original_conv
+        self.rank = rank
+        self.scale = alpha / rank
+
+        in_ch = original_conv.in_channels
+        out_ch = original_conv.out_channels
+
+        # Down-project: C_in → rank  (1×1 conv)
+        self.lora_A = nn.Conv2d(in_ch, rank, 1, bias=False)
+        # Up-project:  rank → C_out (1×1 conv)
+        self.lora_B = nn.Conv2d(rank, out_ch, 1, bias=False)
+
+        # A gets Kaiming init, B starts at zero → LoRA output is 0 at init
+        nn.init.kaiming_normal_(self.lora_A.weight)
+        nn.init.zeros_(self.lora_B.weight)
+
+    def forward(self, x):
+        return self.original_conv(x) + self.scale * self.lora_B(self.lora_A(x))
+
+
+def inject_lora(model, rank=4, alpha=1.0):
+    """Inject LoRA adapters into all ResBlock convolutions.
+
+    Freezes the entire base model and makes only LoRA parameters
+    trainable.  Returns the modified model.
+    """
+    for block in model.body:
+        if isinstance(block, ResBlock):
+            block.conv1 = LoRAConv2d(block.conv1, rank, alpha)
+            block.conv2 = LoRAConv2d(block.conv2, rank, alpha)
+
+    # Freeze everything, then unfreeze only LoRA params
+    for param in model.parameters():
+        param.requires_grad = False
+    for name, param in model.named_parameters():
+        if 'lora_' in name:
+            param.requires_grad = True
+
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    print(f'  LoRA injected: {trainable:,} trainable / {total:,} total params '
+          f'({100 * trainable / total:.1f}%)')
+
+    return model
+
+
+def extract_lora_state_dict(model):
+    """Extract only the LoRA weights from a model."""
+    return {k: v for k, v in model.state_dict().items() if 'lora_' in k}
+
+
+def load_lora_weights(model, lora_path, device='cpu'):
+    """Load LoRA weights into a model that already has LoRA injected."""
+    lora_state = torch.load(lora_path, map_location=device)
+    if 'lora_state' in lora_state:
+        lora_state = lora_state['lora_state']
+    # Merge into the full state dict
+    current_state = model.state_dict()
+    current_state.update(lora_state)
+    model.load_state_dict(current_state)
+    print(f'  LoRA weights loaded from {lora_path}')
+    return model
+
+
 class ResBlock(nn.Module):
     """Residual block without batch norm (BN hurts SR quality)."""
     def __init__(self, channels, res_scale=0.1):
@@ -72,8 +149,10 @@ class DirectSRNet(nn.Module):
                            Fewer blocks = faster but lower quality.
         """
         # Bicubic baseline for global residual learning
+        # CoreML does not support bicubic op, fallback to bilinear during export
+        mode = 'bilinear' if getattr(self, 'coreml_export', False) else 'bicubic'
         bicubic = F.interpolate(
-            x, scale_factor=self.scale, mode='bicubic', align_corners=False
+            x, scale_factor=self.scale, mode=mode, align_corners=False
         )
 
         # Feature extraction
