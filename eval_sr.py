@@ -200,6 +200,10 @@ def eval_batch(model, pairs, device, scale, output_dir=None, save_samples=5):
             all_results.append({
                 'name': name,
                 'delta': delta,
+                'psnr_bic': psnr_bic,
+                'psnr_sr': psnr_sr,
+                'ssim_bic': ssim_bic,
+                'ssim_sr': ssim_sr,
                 'bicubic': bicubic.squeeze(0),
                 'sr': sr_output.squeeze(0),
                 'gt': hr_tensor.squeeze(0),
@@ -220,13 +224,25 @@ def eval_batch(model, pairs, device, scale, output_dir=None, save_samples=5):
         
         best_dir = os.path.join(output_dir, 'best')
         os.makedirs(best_dir, exist_ok=True)
+        summary_lines = ['Rank | Image | PSNR (Bic) | PSNR (SR) | Δ PSNR | SSIM (Bic) | SSIM (SR) | Δ SSIM']
+        summary_lines.append('-' * 100)
         for rank, r in enumerate(unique_results[:save_samples]):
             safe_name = r['name'].replace('/', '_').replace('\\', '_')
             save_path = os.path.join(best_dir, f'{rank+1}_delta{r["delta"]:+.2f}_{safe_name}')
             comparison = [r['bicubic'], r['sr'], r['gt']]
             save_image(comparison, save_path, nrow=3,
                        normalize=True, value_range=(-1, 1))
+            summary_lines.append(
+                f'{rank+1:4d} | {r["name"]:40s} | '
+                f'{r["psnr_bic"]:10.2f} | {r["psnr_sr"]:9.2f} | {r["delta"]:+6.2f} | '
+                f'{r["ssim_bic"]:10.4f} | {r["ssim_sr"]:8.4f} | {r["ssim_sr"] - r["ssim_bic"]:+7.4f}'
+            )
+        # Write summary file
+        summary_path = os.path.join(best_dir, 'summary.txt')
+        with open(summary_path, 'w') as f:
+            f.write('\n'.join(summary_lines) + '\n')
         print(f'\n  Saved top {min(save_samples, len(unique_results))} diverse best samples to: {best_dir}/')
+        print(f'  Metrics saved to: {summary_path}')
 
     avg_bic_psnr = sum(psnr_bicubic_list) / len(psnr_bicubic_list)
     avg_sr_psnr = sum(psnr_sr_list) / len(psnr_sr_list)
