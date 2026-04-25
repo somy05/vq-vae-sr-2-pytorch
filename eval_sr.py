@@ -205,18 +205,28 @@ def eval_batch(model, pairs, device, scale, output_dir=None, save_samples=5):
                 'gt': hr_tensor.squeeze(0),
             })
 
-    # Save the top-N samples with highest PSNR improvement
+    # Save the top-N samples with highest PSNR improvement, ensuring variety
     if output_dir and save_samples > 0 and all_results:
-        all_results.sort(key=lambda r: r['delta'], reverse=True)
+        # Group by scene name (e.g. "static_town08") to get variety
+        best_per_scene = {}
+        for r in all_results:
+            scene_name = r['name'].split('/')[0] if '/' in r['name'] else r['name'].split('_')[0]
+            if scene_name not in best_per_scene or r['delta'] > best_per_scene[scene_name]['delta']:
+                best_per_scene[scene_name] = r
+                
+        # Sort the unique scenes by delta
+        unique_results = list(best_per_scene.values())
+        unique_results.sort(key=lambda r: r['delta'], reverse=True)
+        
         best_dir = os.path.join(output_dir, 'best')
         os.makedirs(best_dir, exist_ok=True)
-        for rank, r in enumerate(all_results[:save_samples]):
+        for rank, r in enumerate(unique_results[:save_samples]):
             safe_name = r['name'].replace('/', '_').replace('\\', '_')
             save_path = os.path.join(best_dir, f'{rank+1}_delta{r["delta"]:+.2f}_{safe_name}')
             comparison = [r['bicubic'], r['sr'], r['gt']]
             save_image(comparison, save_path, nrow=3,
                        normalize=True, value_range=(-1, 1))
-        print(f'\n  Saved top {min(save_samples, len(all_results))} best samples to: {best_dir}/')
+        print(f'\n  Saved top {min(save_samples, len(unique_results))} diverse best samples to: {best_dir}/')
 
     avg_bic_psnr = sum(psnr_bicubic_list) / len(psnr_bicubic_list)
     avg_sr_psnr = sum(psnr_sr_list) / len(psnr_sr_list)
