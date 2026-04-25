@@ -13,6 +13,7 @@ import os
 import torch
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
+from torchvision.utils import save_image
 
 from sr_model import DirectSRNet
 from eval_sr import calc_psnr, calc_ssim, load_and_prepare
@@ -25,7 +26,12 @@ def main():
                         help='Path to model checkpoint')
     parser.add_argument('--lr', nargs='+', required=True,
                         help='Full paths to LR (720p) images. HR found by replacing 720p with 1440p.')
+    parser.add_argument('--output_dir', type=str, default=None,
+                        help='Directory to save the stitched comparison images')
     args = parser.parse_args()
+
+    if args.output_dir:
+        os.makedirs(args.output_dir, exist_ok=True)
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -88,6 +94,13 @@ def main():
 
         print(f'{short:40s} | {psnr_bic:10.2f} | {psnr_sr:9.2f} | {delta_psnr:+6.2f} | '
               f'{ssim_bic:10.4f} | {ssim_sr:8.4f} | {delta_ssim:+7.4f}')
+
+        if args.output_dir:
+            comparison = [bicubic.squeeze(0), sr_output.squeeze(0), hr_tensor.squeeze(0)]
+            safe_name = short.replace('/', '_').replace('\\', '_')
+            save_path = os.path.join(args.output_dir, f'delta{delta_psnr:+.2f}_{safe_name}')
+            save_image(comparison, save_path, nrow=3, padding=0,
+                       normalize=True, value_range=(-1, 1))
 
 
 if __name__ == '__main__':
