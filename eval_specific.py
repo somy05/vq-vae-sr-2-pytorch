@@ -15,7 +15,7 @@ import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 from torchvision.utils import save_image
 
-from sr_model import DirectSRNet
+from sr_model import DirectSRNet, inject_lora, load_lora_weights
 from eval_sr import calc_psnr, calc_ssim, load_and_prepare
 
 
@@ -28,6 +28,8 @@ def main():
                         help='Full paths to LR (720p) images. HR found by replacing 720p with 1440p.')
     parser.add_argument('--output_dir', type=str, default=None,
                         help='Directory to save the stitched comparison images')
+    parser.add_argument('--lora', type=str, default=None,
+                        help='Path to LoRA weights file')
     args = parser.parse_args()
 
     if args.output_dir:
@@ -48,6 +50,13 @@ def main():
         fast_tail=ckpt_args.get('fast_tail', False),
     )
     model.load_state_dict(ckpt['model'])
+
+    # Inject LoRA if specified
+    if args.lora:
+        print(f'Loading LoRA: {args.lora}')
+        inject_lora(model)
+        load_lora_weights(model, args.lora)
+
     model = model.to(device)
     model.eval()
 
