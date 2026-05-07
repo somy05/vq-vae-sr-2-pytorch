@@ -1,15 +1,3 @@
-"""
-Training script for the Direct SR network.
-
-Usage:
-    python train_sr.py \
-        --root /path/to/GameIR-SR \
-        --suffix .rgb.png \
-        --epoch 200 \
-        --batch 16 \
-        --lr 1e-3
-"""
-
 import argparse
 import os
 import math

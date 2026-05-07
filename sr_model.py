@@ -1,29 +1,9 @@
-"""
-Lightweight Direct Super-Resolution Network.
-
-EDSR-inspired architecture: residual blocks in LR space,
-PixelShuffle upscaling, global residual learning from bicubic.
-
-All processing happens at LR resolution for maximum speed.
-Only the final PixelShuffle operates at HR resolution.
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
 class LoRAConv2d(nn.Module):
-    """Low-Rank Adaptation wrapper for Conv2d layers.
-
-    Adds a trainable low-rank path in parallel to a frozen convolution:
-        output = frozen_conv(x) + (alpha/rank) * B(A(x))
-
-    A projects from C_in → rank, B projects from rank → C_out.
-    B is initialised to zeros so the output is identical to the
-    original convolution at injection time.
-    """
-
     def __init__(self, original_conv, rank=4, alpha=1.0):
         super().__init__()
         self.original_conv = original_conv
@@ -47,11 +27,6 @@ class LoRAConv2d(nn.Module):
 
 
 def inject_lora(model, rank=4, alpha=1.0):
-    """Inject LoRA adapters into all ResBlock convolutions.
-
-    Freezes the entire base model and makes only LoRA parameters
-    trainable.  Returns the modified model.
-    """
     for block in model.body:
         if isinstance(block, ResBlock):
             block.conv1 = LoRAConv2d(block.conv1, rank, alpha)
@@ -73,12 +48,10 @@ def inject_lora(model, rank=4, alpha=1.0):
 
 
 def extract_lora_state_dict(model):
-    """Extract only the LoRA weights from a model."""
     return {k: v for k, v in model.state_dict().items() if 'lora_' in k}
 
 
 def load_lora_weights(model, lora_path, device='cpu'):
-    """Load LoRA weights into a model that already has LoRA injected."""
     lora_state = torch.load(lora_path, map_location=device)
     if 'lora_state' in lora_state:
         lora_state = lora_state['lora_state']
@@ -91,7 +64,6 @@ def load_lora_weights(model, lora_path, device='cpu'):
 
 
 class ResBlock(nn.Module):
-    """Residual block without batch norm (BN hurts SR quality)."""
     def __init__(self, channels, res_scale=0.1):
         super().__init__()
         self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
@@ -106,19 +78,6 @@ class ResBlock(nn.Module):
 
 
 class DirectSRNet(nn.Module):
-    """
-    Direct LR → HR super-resolution in a single forward pass.
-
-    Architecture:
-        LR image → feature extraction → N residual blocks (LR space)
-        → PixelShuffle upscale → HR residual
-        → add to bicubic baseline → HR output
-
-    Args:
-        scale: upscaling factor (default 2)
-        n_channels: feature channels (default 64)
-        n_blocks: number of residual blocks (default 16)
-    """
     def __init__(self, scale=2, n_channels=64, n_blocks=16, fast_tail=False):
         super().__init__()
         self.scale = scale
@@ -142,12 +101,6 @@ class DirectSRNet(nn.Module):
         )
 
     def forward(self, x, active_blocks=None):
-        """
-        Args:
-            x: LR input image
-            active_blocks: number of residual blocks to use (None = all).
-                           Fewer blocks = faster but lower quality.
-        """
         # Bicubic baseline for global residual learning
         # CoreML does not support bicubic op, fallback to bilinear during export
         mode = 'bilinear' if getattr(self, 'coreml_export', False) else 'bicubic'

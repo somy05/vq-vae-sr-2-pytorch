@@ -1,25 +1,3 @@
-"""
-Evaluation and benchmarking for Direct SR.
-
-Supports two modes:
-  1. Single-image: evaluate on one LR/HR pair with visual comparison.
-  2. Batch dataset: evaluate over an entire GameIR test directory and
-     compute average PSNR across all images.
-
-Usage (single image):
-    python eval_sr.py \
-        --ckpt checkpoint/sr_direct_030.pt \
-        --lr_image path/to/720p.png \
-        --hr_image path/to/1440p.png \
-        --do_benchmark
-
-Usage (batch dataset):
-    python eval_sr.py \
-        --ckpt checkpoint/sr_direct_030.pt \
-        --test_root path/to/GameIR-SR-mini-test/ \
-        --do_benchmark
-"""
-
 import argparse
 import math
 import os
@@ -35,7 +13,6 @@ from sr_model import DirectSRNet, inject_lora, load_lora_weights
 
 
 def calc_psnr(pred, target):
-    """PSNR for images in [-1, 1] range, reported on [0, 255] scale."""
     pred_255 = ((pred + 1) / 2 * 255).clamp(0, 255)
     target_255 = ((target + 1) / 2 * 255).clamp(0, 255)
     mse = F.mse_loss(pred_255, target_255)
@@ -45,11 +22,6 @@ def calc_psnr(pred, target):
 
 
 def calc_ssim(pred, target, window_size=11):
-    """SSIM for images in [-1, 1] range.
-
-    Uses a Gaussian-weighted sliding window approach.
-    Returns a scalar SSIM value in [0, 1].
-    """
     # Convert to [0, 1]
     pred = ((pred + 1) / 2).clamp(0, 1)
     target = ((target + 1) / 2).clamp(0, 1)
@@ -117,7 +89,6 @@ def benchmark(model, lr_tensor, device, warmup=5, runs=50):
 
 
 def discover_pairs(root, lr_res='720p', hr_res='1440p', suffix='_rgb.png'):
-    """Discover all LR/HR image pairs in a GameIR directory tree."""
     pairs = []
     for dirpath, dirnames, filenames in os.walk(root):
         if lr_res not in dirnames or hr_res not in dirnames:
@@ -138,7 +109,6 @@ def discover_pairs(root, lr_res='720p', hr_res='1440p', suffix='_rgb.png'):
 
 
 def load_and_prepare(image_path, normalize=True):
-    """Load an image and convert to tensor."""
     img = Image.open(image_path).convert('RGB')
     tensor = TF.to_tensor(img)
     if normalize:
@@ -148,12 +118,10 @@ def load_and_prepare(image_path, normalize=True):
 
 @torch.no_grad()
 def eval_batch(model, pairs, device, scale, output_dir=None, save_samples=5):
-    """Evaluate model on all image pairs, returning average PSNR and SSIM."""
     psnr_bicubic_list = []
     psnr_sr_list = []
     ssim_bicubic_list = []
     ssim_sr_list = []
-    # Collect data for saving best samples later
     all_results = []
 
     if output_dir:
@@ -163,7 +131,6 @@ def eval_batch(model, pairs, device, scale, output_dir=None, save_samples=5):
         lr_tensor, (lr_w, lr_h) = load_and_prepare(lr_path)
         hr_tensor, (hr_w, hr_h) = load_and_prepare(hr_path)
 
-        # Ensure HR matches expected size
         expected_h, expected_w = lr_h * scale, lr_w * scale
         hr_tensor = TF.resize(hr_tensor.squeeze(0), [expected_h, expected_w],
                               antialias=True).unsqueeze(0)
@@ -230,7 +197,7 @@ def eval_batch(model, pairs, device, scale, output_dir=None, save_samples=5):
             safe_name = r['name'].replace('/', '_').replace('\\', '_')
             save_path = os.path.join(best_dir, f'{rank+1}_delta{r["delta"]:+.2f}_{safe_name}')
             comparison = [r['bicubic'], r['sr'], r['gt']]
-            save_image(comparison, save_path, nrow=3,
+            save_image(comparison, save_path, nrow=3, padding=0,
                        normalize=True, value_range=(-1, 1))
             summary_lines.append(
                 f'{rank+1:4d} | {r["name"]:40s} | '
@@ -313,7 +280,6 @@ def main():
     fast_tail = ckpt_args.get('fast_tail', False)
     print(f'Model: {n_params:,} params | Scale: {scale}× | fast_tail: {fast_tail}')
 
-    # ── Batch dataset mode ──────────────────────────────────────────
     if args.test_root:
         pairs = discover_pairs(args.test_root, args.lr_res, args.hr_res,
                                args.suffix)
@@ -374,7 +340,7 @@ def main():
 
         return
 
-    # ── Single-image mode (original) ────────────────────────────────
+
     lr_img = Image.open(args.lr_image).convert('RGB')
     lr_w, lr_h = lr_img.size
     hr_w, hr_h = lr_w * scale, lr_h * scale

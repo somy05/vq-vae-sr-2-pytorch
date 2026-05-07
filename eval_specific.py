@@ -1,12 +1,3 @@
-"""
-Evaluate specific images to get their exact PSNR and SSIM.
-
-Usage:
-    python eval_specific.py \
-        --ckpt checkpoint_fast/sr_direct_030.pt \
-        --lr path/to/720p/00000050.rgb.png path/to/720p/00000030.rgb.png
-"""
-
 import argparse
 import os
 

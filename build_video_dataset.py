@@ -5,10 +5,7 @@ from PIL import Image
 from tqdm import tqdm
 
 def process_video(video_path, out_root, scene_name, fps_extract=2, lr_scale=2):
-    """
-    Extracts frames from a video and saves perfectly aligned HR and LR (Bicubic) pairs.
-    Folder structure matches the GameIR dataset nested loader.
-    """
+    
     # Create GameIR-style nested directories: root/scene/sequence/resolution/
     seq_name = "00"
     hr_dir = os.path.join(out_root, scene_name, seq_name, '1440p')
@@ -38,15 +35,12 @@ def process_video(video_path, out_root, scene_name, fps_extract=2, lr_scale=2):
             break
             
         if frame_count % frame_interval == 0:
-            # OpenCV loads as BGR, convert to RGB for PIL
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             hr_img = Image.fromarray(frame_rgb)
             
-            # Calculate LR size
             w, h = hr_img.size
             lr_size = (w // lr_scale, h // lr_scale)
             
-            # Downsample using anti-aliased Bicubic
             lr_img = hr_img.resize(lr_size, Image.Resampling.BICUBIC)
             
             filename = f"{saved_count:08d}.rgb.png"

@@ -1,26 +1,10 @@
-"""
-VGG19-based Perceptual Loss for Super-Resolution.
-
-Computes feature-space L1 distance between predicted and target images
-using intermediate layers of a pre-trained VGG19 network.
-
-Reference: Johnson et al. (2016), "Perceptual Losses for Real-Time
-Style Transfer and Super-Resolution."
-"""
-
 import torch
 import torch.nn as nn
 from torchvision import models
 
 
 class PerceptualLoss(nn.Module):
-    """
-    Extracts features from VGG19 conv layers and computes L1 distance.
 
-    Uses features before the 2nd, 4th, and 5th max-pool layers
-    (conv2_2, conv4_4, conv5_4), capturing low, mid, and high-level
-    structure respectively.
-    """
     def __init__(self):
         super().__init__()
         vgg = models.vgg19(weights=models.VGG19_Weights.IMAGENET1K_V1).features
@@ -44,12 +28,10 @@ class PerceptualLoss(nn.Module):
         )
 
     def _normalize(self, x):
-        """Convert from [-1, 1] (our model range) to ImageNet range."""
         x = (x + 1) / 2  # → [0, 1]
         return (x - self.mean) / self.std
 
     def forward(self, pred, target):
-        """Compute perceptual loss between pred and target images."""
         pred = self._normalize(pred)
         target = self._normalize(target)
 
