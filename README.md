@@ -1,0 +1,1 @@
+A lightweight CNN for upscaling game images from 720p to 1440p. There are two versions: a fast model with 4 residual blocks and a lower channel count, and a quality version with 16 residual blocks and double the channel size.
